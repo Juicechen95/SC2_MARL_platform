@@ -1,23 +1,24 @@
 import time
 import numpy as np
 from baselines import logger
-from common import flatten_lists
 
 
 class Runner:
-    def __init__(self, envs, agent, n_steps=8):
+    def __init__(self, envs, agt1, agt2, n_steps=8):
         self.state = self.logs = self.ep_rews = None
-        self.agent, self.envs, self.n_steps = agent, envs, n_steps
+        self.agt1, self.agt2, self.envs, self.n_steps = agt1, agt2, envs, n_steps
 
-    def run(self, num_updates=1, train=True):
+    def run(self, num_updates=1, train=False):
         # based on https://github.com/deepmind/pysc2/blob/master/pysc2/env/run_loop.py
         self.reset()
         try:
             for i in range(num_updates):
                 self.logs['updates'] += 1
                 rollout = self.collect_rollout()
+                # !
                 if train:
-                    self.agent.train(i, *rollout)
+                    self.agt1.train(i, *rollout)
+                    self.agt2.train(i, *rollout)
         except KeyboardInterrupt:
             pass
         finally:
@@ -26,19 +27,31 @@ class Runner:
             print("Took %.3f seconds for %s steps: %.3f fps" % (elapsed_time, frames, frames / elapsed_time))
 
     def collect_rollout(self):
-        states, actions = [None]*self.n_steps, [None]*self.n_steps
-        rewards, dones, values = np.zeros((3, self.n_steps, self.envs.num_envs))
+        states, actions1, actions2 = [[None, None]]*self.n_steps, [None]*self.n_steps, [None]*self.n_steps
+        rewards1, dones1, values1 = np.zeros((3, self.n_steps, self.envs.num_envs))
+        rewards2, dones2, values2 = np.zeros((3, self.n_steps, self.envs.num_envs))
 
         for step in range(self.n_steps):
-            action, values[step] = self.agent.act(self.state)
-            states[step], actions[step] = self.state, action
-            self.state, rewards[step], dones[step] = self.envs.step(action)
+            actions1[step], values1[step] = self.agt1.act(self.state[0])  # TODO modify this state to fit two players
+            actions2[step], values2[step] = self.agt2.act(self.state[1])
+            states[step] = self.state
+            actions = [actions1[step], actions2[step]]
+            self.state, rewards, dones = self.envs.step(actions)
+            rewards1[step], rewards2[step] = rewards
+            dones1[step], dones2[step] = dones
 
-            self.log(rewards[step], dones[step])
+            # we select agt1 as the main player
+            self.log(rewards1[step], dones1[step])
 
-        last_value = self.agent.get_value(self.state)
+        last_value1 = self.agt1.get_value(self.state[0])
+        last_value2 = self.agt2.get_value(self.state[1])
 
-        return flatten_lists(states), flatten_lists(actions), rewards, dones, last_value, self.ep_rews
+        actions = [actions1, actions2]
+        rewards = [rewards1, rewards2]
+        dones = [dones1, dones2]
+        last_value = [last_value1, last_value2]
+
+        return flatten_lists(states, num=2), flatten_lists(actions, num=2), rewards, dones, last_value, self.ep_rews
 
     def reset(self):
         self.state, *_ = self.envs.reset()
@@ -71,3 +84,25 @@ class Runner:
 
         self.logs['dones'] = np.zeros(self.envs.num_envs)
         self.logs['ep_rew'] = np.zeros(self.envs.num_envs)
+
+
+def flatten(x):
+    x = np.array(x)  # TODO replace with concat if axis != 0
+    return x.reshape(-1, *x.shape[2:])
+
+
+def flatten_dicts(x):
+    return {k: flatten([s[k] for s in x]) for k in x[0].keys()}
+
+
+#  n-steps x actions x envs -> actions x n-steps*envs
+def flatten_lists(input, num=1):
+    if num == 1:
+        x = input
+        output = [flatten([s[a] for s in x]) for a in range(len(x[0]))]
+    else:
+        output = []
+        for i in range(num):
+            x = input[i]
+            output.append([flatten([s[a] for s in x]) for a in range(len(x[0]))])
+    return output

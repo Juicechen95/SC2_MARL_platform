@@ -2,32 +2,39 @@ import tensorflow as tf
 from tensorflow.contrib import layers
 from agt1.Config import Config
 
-agt_config = Config()
 
+# The following codes are for agent vs agent scenario where two different agents are needed
+# If you only need to use one agent (in agt1) and hope to set agt2 to built-in AI,
+# please follow these steps:
+# 1. Set num_player = 1 and choose a value for bot_level in Model.py
+# 2. Remove all vars ended with 2 (indicating player2)
+
+
+Config = Config()
 
 class Agent:
-    def __init__(self, sess, env_config):
+    def __init__(self, sess, default_config):
         """
         :param Config:
             Config.restore: whether to restore a saved policy model
             Config.restore_path: path to the saved policy model of agent, ./model/ by default.
         """
         self.sess = sess
-        self.env_config = env_config
+        self.config = default_config
 
         # set up policy network
-        # under specific scope (recommend 'pol1')
-        with tf.variable_scope('pol1'):
+        # under specific scope (recommend 'pol2')
+        with tf.variable_scope('pol2'):
             self.policy = self.model_fn(Config)  # example policy
 
             # restore model if provided
             # model stored in ./model/model.ckpt.meta
-            # restore from scope('pol1') to scope('pol1')
-            if agt_config.restore:
-                self.pol_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='pol1')
+            # restore from scope('pol2') to scope('pol2')
+            if Config.restore:
+                self.pol_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='pol2')
                 self.pol_saver = tf.train.Saver(self.pol_vars)
-                self.pol_saver.restore(self.sess, agt_config.restore_path)
-
+                self.pol_saver.restore(self.sess, Config.restore_path)
+            
         def sample(probs):
             u = tf.random_uniform(tf.shape(probs))
             return tf.argmax(tf.log(u) / probs, axis=1)
@@ -64,23 +71,15 @@ class Agent:
 
         def non_spatial_block(sz, dims, idx):
             block_inputs = [tf.placeholder(tf.float32, [None, *dim]) for dim in dims]
-
-            # print('idx')
-            # print(idx['player'])
-            # print('block_inputs')
-            # print(block_inputs[idx['player']])
-            # print('sz')
-            # print(sz)
-
             block = broadcast(tf.log(block_inputs[idx['player']] + 1.0), sz)
             return block
 
         def broadcast(tensor, sz):
             return tf.tile(tf.expand_dims(tf.expand_dims(tensor, 2), 3), [1, 1, sz, sz])
 
-        screen = cnn_block(self.env_config.sz, self.env_config.screen_dims(), self.env_config.embed_dim_fn)
-        minimap = cnn_block(self.env_config.sz, self.env_config.minimap_dims(), self.env_config.embed_dim_fn)
-        non_spatial = non_spatial_block(self.env_config.sz, self.env_config.non_spatial_dims(), self.env_config.ns_idx)
+        screen = cnn_block(self.config.sz, self.config.screen_dims(), self.config.embed_dim_fn)
+        minimap = cnn_block(self.config.sz, self.config.minimap_dims(), self.config.embed_dim_fn)
+        non_spatial = non_spatial_block(self.config.sz, self.config.non_spatial_dims(), self.config.ns_idx)
 
         state = tf.concat([screen, minimap, non_spatial], axis=1)
         fc1 = layers.fully_connected(layers.flatten(state), num_outputs=256)
@@ -102,3 +101,4 @@ class Agent:
         # train agt here (example in https://github.com/inoryy/reaver-pysc2/blob/v1.0/rl/agent.py),
         # or in Model.py (example in https://github.com/openai/baselines/blob/master/baselines/a2c/a2c.py)
         pass
+

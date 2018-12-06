@@ -5,17 +5,19 @@ from core.Runner import Runner
 
 
 class Model:
-    def __init__(self, Agt1, Config1, Agt2, Config2, args):
+    def __init__(self, Agt1, Agt2, args):
+
+        num_player = 2
+        bot_level = 'easy'
+
         tf.reset_default_graph()
         self.sess = tf.Session()
+        self.envs = EnvWrapper(make_envs(args, num_player, bot_level), args)
+        config = self.envs.get_config()
+        self.agt1 = Agt1(self.sess, config)
+        self.agt2 = Agt2(self.sess, config)
 
-        self.envs = EnvWrapper(make_envs(args))
-        agt1 = Agt1(Config1)
-        agt2 = Agt2(Config2)
-
-        # restore model
-
-        runner = Runner(self.envs, agt1, agt2)
+        runner = Runner(self.envs, self.agt1, self.agt2, args.steps)
         runner.run()
         
         if args.save_replay:
