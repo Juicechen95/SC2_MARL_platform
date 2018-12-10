@@ -6,106 +6,90 @@ from pysc2.lib import features
 from pysc2.lib.actions import FunctionCall, FUNCTIONS, TYPES
 from s2clientprotocol import common_pb2 as sc_common
 from s2clientprotocol import sc2api_pb2 as sc_pb
-
-
-CAT = features.FeatureType.CATEGORICAL
-
-DEFAULT_ARGS = dict(
-    screen=0,  # converts to (0,0)
-    minimap=0,
-    screen2=0,
-    queued=False,
-    control_group_act=sc_ui.ActionControlGroup.Append,
-    control_group_id=1,
-    select_point_act=sc_spatial.ActionSpatialUnitSelectionPoint.Select,
-    select_add=True,
-    select_unit_act=sc_ui.ActionMultiPanel.SelectAllOfType,
-    select_unit_id=0,
-    select_worker=sc_ui.ActionSelectIdleWorker.AddAll,
-    build_queue_id=0,
-    unload_id=0
-)
-
-# name => dims
-# single player version:
-# NON_SPATIAL_FEATURES = dict(
-#     player=(11,),
-#     game_loop=(1,),
-#     score_cumulative=(13,),
-#     available_actions=(len(FUNCTIONS),),
-#     single_select=(1, 7),
-#     # multi_select=(0, 7), # TODO
-#     # cargo=(0, 7), # TODO
-#     cargo_slots_available=(1,),
-#     # build_queue=(0, 7), # TODO
-#     control_groups=(10, 2),
-# )
-
-NON_SPATIAL_FEATURES = dict(
-    player=(11,),
-    game_loop=(1,),
-    score_cumulative=(13,),
-    available_actions=(len(FUNCTIONS),),
-    single_select=(1, 7),
-    # multi_select=(0, 7), # TODO
-    # cargo=(0, 7), # TODO
-    cargo_slots_available=(1,),
-    # build_queue=(0, 7), # TODO
-    control_groups=(10, 2),
-)
+from pysc2.env.environment import StepType
+from pysc2.lib.actions import ABILITY_IDS
+from pysc2.lib import actions
 
 
 class EnvWrapper:
-    def __init__(self, envs, args):
+    def __init__(self, envs):
         self.envs = envs
-        self.config = Config(args.sz, args.map, args.run_id)
-
-    def get_config(self):
-        return self.config
 
     def step(self, acts):
         act1, act2 = acts
-        act1 = self.wrap_actions(act1)
-        act2 = self.wrap_actions(act2)
+        act1 = self.wrap_actions(act1, self.units1, self.units2)
+        act2 = self.wrap_actions(act2, self.units2, self.units1)
         acts = [act1, act2]
+        print(acts)
         results = self.envs.step(acts)
-        ob1, ob2 = results
-        ob1 = self.wrap_results(ob1)
-        ob2 = self.wrap_results(ob2)
-        return [ob1, ob2]
+        self.update_units_alive(results)
+        ts1, ts2 = results
+        ob1, rew1, done1 = self.trans_obs(ts1, self.units1, self.units2)
+        ob2, rew2, done2 = self.trans_obs(ts2, self.units2, self.units1)
+        return [ob1, ob2], [rew1, rew2], [done1, done2]
 
     def reset(self):
         results = self.envs.reset()
-        ob1, ob2 = results
-        ob1 = self.wrap_results(ob1)
-        ob2 = self.wrap_results(ob2)
-        return [ob1, ob2]
+        self.update_unit_list(results)
+        self.update_units_alive(results)
+        ts1, ts2 = results
+        ob1, rew1, done1 = self.trans_obs(ts1, self.units1, self.units2)
+        ob2, rew2, done2 = self.trans_obs(ts2, self.units2, self.units1)
+        return [ob1, ob2], [rew1, rew2], [done1, done2]
 
-    def wrap_actions(self, actions):
-        acts, args = actions[0], actions[1:]
-
+    def wrap_actions(self, actions, alliances, enemies):
+        actions = actions[0]
         wrapped_actions = []
-        for i, act in enumerate(acts):
-            act_args = []
-            for arg_type in FUNCTIONS[act].args:
-                act_arg = [DEFAULT_ARGS[arg_type.name]]
-                if arg_type.name in self.config.act_args:
-                    act_arg = [args[self.config.arg_idx[arg_type.name]][i]]
-                if is_spatial(arg_type.name):  # spatial args, convert to coords
-                    act_arg = [act_arg[0] % self.config.sz, act_arg[0] // self.config.sz]  # (y,x), fix for PySC2
-                act_args.append(act_arg)
-            wrapped_actions.append(FunctionCall(act, act_args))
+        for i in range(len(actions)):
+            if alliances[i] not in self.units_alive:
+                continue
+            wrapped_actions.append(self.mapping(alliances[i], actions[i], enemies))
 
         return wrapped_actions
 
-    def wrap_results(self, results):
-        obs = [res.observation for res in results]
-        rewards = [res.reward for res in results]
-        dones = [res.last() for res in results]
+    def mapping(self, unit, action, enemies):
+        if action == 0:
+            return hold(unit)
+        elif action <= 4:
+            for u in self.feature_units:
+                if u.tag == unit:
+                    cur_pos = [u.x, u.y]
+            unit_dist = [[0, 1], [0, -1], [-1, 0], [1, 0]]
+            new_pos = [cur_pos[0] + unit_dist[action - 1][0], cur_pos[1] + unit_dist[action - 1][1]]
+            return move(unit, new_pos)
+        elif action <= 10:
+            target = enemies[action - 5]
+            if target in self.units_alive:
+                return attack(unit, target)
+            else:
+                return None
 
-        states = self.config.preprocess(obs)
+    def update_unit_list(self, timestep):
+        ts = timestep[0]
+        feature_units = ts.observation.feature_units
+        feature_units = sorted(feature_units, key=lambda x: x.tag)
+        feature_units = sorted(feature_units, key=lambda x: x.unit_type)
+        self.units1 = [u.tag for u in feature_units if u.owner == 1]
+        self.units2 = [u.tag for u in feature_units if u.owner == 2]
 
-        return states, rewards, dones
+    def update_units_alive(self, timestep):
+        ts = timestep[0]
+        self.feature_units = ts.observation.feature_units
+        self.units_alive = [u.tag for u in self.feature_units]
+
+    def trans_obs(self, timestep, alliances, enemies):
+        ts = timestep
+        raw_obs, reward, done = ts.observation, ts.reward, ts.step_type == StepType.LAST
+        feature_units = ts.observation.feature_units
+        obs_feature = []
+        for unit in alliances:
+            for u in feature_units:
+                if u.tag == unit:
+                    obs_feature.append(list(u))  # Define your obs here
+                    break
+            else:
+                obs_feature.append([0]*13)  # details are in pysc2.features.FeatureUnit
+        return obs_feature, reward, done
 
     def save_replay(self, replay_dir='PySC2Replays'):
         self.envs.save_replay(replay_dir)
@@ -121,20 +105,105 @@ class EnvWrapper:
         return self.envs.num_envs
 
 
+def isalive(unit):
+    return unit.health_ratio > 0
+
+args = [
+    'screen',
+    'minimap',
+    'screen2',
+    'queued',
+    'control_group_act',
+    'control_group_id',
+    'select_add',
+    'select_point_act',
+    # 'select_unit_act',
+    # 'select_unit_id'
+    'select_worker',
+    # 'build_queue_id',
+    # 'unload_id'
+]
+
+defaults = {
+            'control_group_act': 0,
+            'control_group_id': 0,
+            'select_point_act': 0,
+            'select_unit_act': 0,
+            'select_unit_id': 0,
+            'build_queue_id': 0,
+            'unload_id': 0,
+        }
+
+def hold(u):
+    action = sc_pb.Action()
+    action.action_raw.unit_command.ability_id = 18
+    action.action_raw.unit_command.unit_tags.append(u)
+    return action
+
+
+def move(u, pos):
+    action = sc_pb.Action()
+    action.action_raw.unit_command.ability_id = 16
+    action.action_raw.unit_command.target_world_space_pos.x = pos[0]
+    action.action_raw.unit_command.target_world_space_pos.y = pos[1]
+    action.action_raw.unit_command.unit_tags.append(u)
+    return action
+
+
+def attack(u, target_unit):
+    action = sc_pb.Action()
+    action.action_raw.unit_command.ability_id = 23
+    action.action_raw.unit_command.target_unit_tag = target_unit
+    action.action_raw.unit_command.unit_tags.append(u)
+    return action
+
+# def __call__(self, action):
+#     defaults = {
+#         'control_group_act': 0,
+#         'control_group_id': 0,
+#         'select_point_act': 0,
+#         'select_unit_act': 0,
+#         'select_unit_id': 0,
+#         'build_queue_id': 0,
+#         'unload_id': 0,
+#     }
+#     fn_id_idx, args = action.pop(0), []
+#     fn_id = self.func_ids[fn_id_idx]
+#     for arg_type in actions.FUNCTIONS[fn_id].args:
+#         arg_name = arg_type.name
+#         if arg_name in self.args:
+#             arg = action[self.args.index(arg_name)]
+#             # pysc2 expects all args in their separate lists
+#             if type(arg) not in [list, tuple]:
+#                 arg = [arg]
+#             # pysc2 expects spatial coords, but we have flattened => attempt to fix
+#             if len(arg_type.sizes) > 1 and len(arg) == 1:
+#                 arg = [arg[0] % self.spatial_dim, arg[0] // self.spatial_dim]
+#             args.append(arg)
+#         else:
+#             args.append([defaults[arg_name]])
+#
+#     return [actions.FunctionCall(fn_id, args)]
+
 from pysc2.env import sc2_env
 from multiprocessing import Process, Pipe
 import collections
-Agent = collections.namedtuple("Agent", ["race"])
-Bot = collections.namedtuple("Bot", ["race", "difficulty"])
+from pysc2.env.sc2_env import Agent, Bot
 
 
 def make_envs(args, num_player, bot_level):
-    env_args = dict(map_name=args.map, num_player=num_player, bot_level=bot_level, step_mul=8, game_steps_per_episode=0)
-    return EnvPool([make_env(args.sz, **dict(env_args, visualize=i < args.render)) for i in range(args.envs)])
+    aif = sc2_env.AgentInterfaceFormat(
+                        feature_dimensions=sc2_env.Dimensions(
+                        screen=args.sz,
+                        minimap=args.sz), use_feature_units=True)
+    env_args = dict(map_name=args.map, num_player=num_player, bot_level=bot_level,
+                    agent_interface_format=[aif, aif], step_mul=8, game_steps_per_episode=0)
+    # return EnvPool([make_env(args.sz, **dict(env_args, visualize=i < args.render)) for i in range(args.envs)])
+    return make_env(**dict(env_args, visualize=True))
 
 
 # based on https://github.com/ikostrikov/pytorch-a2c-ppo-acktr/blob/master/envs.py
-def make_env(num_player, bot_level, sz=32, **params):
+def make_env(num_player, bot_level, **params):
 
     if num_player == 2:
         players = [Agent(sc_common.Random), Agent(sc_common.Random)]  # race here only affects the type of UI
@@ -164,25 +233,11 @@ def make_env(num_player, bot_level, sz=32, **params):
         raise ValueError
 
     def _thunk():
-        params['screen_size_px'] = params['minimap_size_px'] = (sz, sz)
         env = sc2_env.SC2Env(players=players, **params)
         return env
 
-    return _thunk
-
-
-# class Difficulty(enum.IntEnum):
-#   """Bot difficulties."""
-#   very_easy = sc_pb.VeryEasy
-#   easy = sc_pb.Easy
-#   medium = sc_pb.Medium
-#   medium_hard = sc_pb.MediumHard
-#   hard = sc_pb.Hard
-#   harder = sc_pb.Harder
-#   very_hard = sc_pb.VeryHard
-#   cheat_vision = sc_pb.CheatVision
-#   cheat_money = sc_pb.CheatMoney
-#   cheat_insane = sc_pb.CheatInsane
+    # return _thunk
+    return _thunk()
 
 
 # based on https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py
@@ -259,103 +314,3 @@ class EnvPool(object):
     @property
     def num_envs(self):
         return len(self.remotes)
-
-
-class Config:
-    # TODO extract embed_dim_fn to config
-    def __init__(self, sz, map, run_id, embed_dim_fn=lambda x: max(1, round(np.log2(x)))):
-        self.run_id = run_id
-        self.sz, self.map = sz, map
-        self.embed_dim_fn = embed_dim_fn
-        self.feats = self.acts = self.act_args = self.arg_idx = self.ns_idx = None
-        cfg_path = 'res/config.json.dist'
-        self.build(cfg_path)
-
-    def build(self, cfg_path):
-        feats, acts, act_args = self._load(cfg_path)
-
-        if 'screen' not in feats:
-            feats['screen'] = features.SCREEN_FEATURES._fields
-        if 'minimap' not in feats:
-            feats['minimap'] = features.MINIMAP_FEATURES._fields
-        if 'non_spatial' not in feats:
-            feats['non_spatial'] = NON_SPATIAL_FEATURES.keys()
-        self.feats = feats
-
-        # TODO not connected to anything atm
-        if acts is None:
-            acts = FUNCTIONS
-        self.acts = acts
-
-        if act_args is None:
-            act_args = TYPES._fields
-        self.act_args = act_args
-
-        self.arg_idx = {arg: i for i, arg in enumerate(self.act_args)}
-        self.ns_idx = {f: i for i, f in enumerate(self.feats['non_spatial'])}
-
-        print('feats')
-        print(self.feats)
-        print('arg_idx')
-        print(self.arg_idx)
-        print('ns_idx')
-        print(self.ns_idx)
-        print('NON_SPATIAL_FEATURES')
-        print(NON_SPATIAL_FEATURES)
-
-    def map_id(self):
-        return self.map + str(self.sz)
-
-    def full_id(self):
-        if self.run_id == -1:
-            return self.map_id()
-        return self.map_id() + "/" + str(self.run_id)
-
-    def policy_dims(self):
-        return [(len(self.acts), 0)] + [(getattr(TYPES, arg).sizes[0], is_spatial(arg)) for arg in self.act_args]
-
-    def screen_dims(self):
-        return self._dims('screen')
-
-    def minimap_dims(self):
-        return self._dims('minimap')
-
-    def non_spatial_dims(self):
-        return [NON_SPATIAL_FEATURES[f] for f in self.feats['non_spatial']]
-
-    # TODO maybe move preprocessing code into separate class?
-    def preprocess(self, obs):
-        return [self._preprocess(obs, _type) for _type in ['screen', 'minimap'] + self.feats['non_spatial']]
-
-    def _dims(self, _type):
-        return [f.scale ** (f.type == CAT) for f in self._feats(_type)]
-
-    def _feats(self, _type):
-        feats = getattr(features, _type.upper() + '_FEATURES')
-        return [getattr(feats, f_name) for f_name in self.feats[_type]]
-
-    def _preprocess(self, obs, _type):
-        if _type in self.feats['non_spatial']:
-            return np.array([self._preprocess_non_spatial(ob, _type) for ob in obs])
-        spatial = [[ob[_type][f.index] for f in self._feats(_type)] for ob in obs]
-        return np.array(spatial).transpose((0, 2, 3, 1))
-
-    def _preprocess_non_spatial(self, ob, _type):
-        if _type == 'available_actions':
-            acts = np.zeros(len(self.acts))
-            acts[ob['available_actions']] = 1
-            return acts
-        return ob[_type]
-
-    def save(self, cfg_path):
-        with open(cfg_path, 'w') as fl:
-            json.dump({'feats': self.feats, 'act_args': self.act_args}, fl)
-
-    def _load(self, cfg_path):
-        with open(cfg_path, 'r') as fl:
-            data = json.load(fl)
-        return data.get('feats'), data.get('acts'), data.get('act_args')
-
-
-def is_spatial(arg):
-    return arg in ['screen', 'screen2', 'minimap']

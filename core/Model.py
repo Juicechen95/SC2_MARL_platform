@@ -9,13 +9,16 @@ class Model:
 
         num_player = 2
         bot_level = 'easy'
+        # bot_level = 'veryeasy', 'easy', 'medium', 'mediumhard', 'hard',
+        # 'veryhard', 'cheatvision', 'cheatmoney', 'cheatinsane':
 
         tf.reset_default_graph()
-        self.sess = tf.Session()
-        self.envs = EnvWrapper(make_envs(args, num_player, bot_level), args)
-        config = self.envs.get_config()
-        self.agt1 = Agt1(self.sess, config)
-        self.agt2 = Agt2(self.sess, config)
+        self.sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True))
+        self.envs = EnvWrapper(make_envs(args, num_player, bot_level))
+        # config = self.envs.get_config()
+        self.agt1 = Agt1(self.sess)
+        self.agt2 = Agt2(self.sess)
+        self.sess.run(tf.global_variables_initializer())
 
         runner = Runner(self.envs, self.agt1, self.agt2, args.steps)
         runner.run()

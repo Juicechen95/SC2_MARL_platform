@@ -26,10 +26,10 @@ def parse_arg():
     parser.add_argument('-eval_timesteps_per_batch', type=int, default=5*int(1e3))
 
     # other settings
-    parser.add_argument("-sz", type=int, default=32)
-    parser.add_argument("-envs", type=int, default=2)
+    parser.add_argument("-sz", type=int, default=64)
+    parser.add_argument("-envs", type=int, default=1)
     parser.add_argument("-render", type=int, default=1)
-    parser.add_argument("-steps", type=int, default=1)
+    parser.add_argument("-steps", type=int, default=1000)
     parser.add_argument("-run_id", type=int, default=-1)
     parser.add_argument('-output_path', type=str, default='./res/')
     parser.add_argument('-save_replay', type=bool, default=False)
